@@ -1,0 +1,57 @@
+name: Rover CI
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+
+jobs:
+  quality:
+    name: Quality Gate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 26
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "26"
+          cache: maven
+
+      - name: Run Checkstyle Quality Profile
+        run: mvn -B -ntp -Pquality clean verify -DskipTests -Dcommit.hash=${{ github.sha }}
+
+  coverage:
+    name: Coverage Gate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 26
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "26"
+          cache: maven
+
+      - name: Run JaCoCo Coverage Profile
+        run: mvn -B -ntp -Pcoverage clean verify -Dcommit.hash=${{ github.sha }}
+
+      - name: Upload JaCoCo Reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jacoco-reports
+          if-no-files-found: warn
+          path: |
+            **/target/site/jacoco/index.html
+            **/target/site/jacoco/jacoco.xml
+            **/target/site/jacoco/jacoco.csv
+            **/target/site/jacoco/jacoco-resources/**
+            **/target/site/jacoco/com.*/**

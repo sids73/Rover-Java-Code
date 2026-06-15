@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AC13 Web Controller</title>
+  <style>
+    :root {
+      --bg: #111218;
+      --panel: #1a1d27;
+      --accent: #5cd6ff;
+      --warn: #ffd166;
+      --text: #eef2ff;
+      --muted: #9da8c8;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: "Segoe UI", sans-serif;
+      color: var(--text);
+      background: radial-gradient(1200px 700px at 20% -10%, #273350 0, var(--bg) 55%);
+      min-height: 100vh;
+      padding: 20px;
+      display: grid;
+      place-items: center;
+    }
+
+    .wrap {
+      width: min(980px, 100%);
+      background: color-mix(in srgb, var(--panel), black 15%);
+      border: 1px solid #2a3145;
+      border-radius: 18px;
+      overflow: hidden;
+      box-shadow: 0 24px 50px rgba(0, 0, 0, 0.35);
+    }
+
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 14px 18px;
+      background: #131722;
+      border-bottom: 1px solid #2a3145;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 18px;
+      letter-spacing: 0.5px;
+    }
+
+    .status {
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    main {
+      display: grid;
+      grid-template-columns: 1.4fr 1fr;
+      gap: 16px;
+      padding: 16px;
+    }
+
+    .video {
+      background: #0a0c12;
+      border-radius: 14px;
+      border: 1px solid #262c3d;
+      overflow: hidden;
+      aspect-ratio: 4 / 3;
+    }
+
+    .video img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      display: block;
+    }
+
+    .panel {
+      background: #121624;
+      border: 1px solid #262c3d;
+      border-radius: 14px;
+      padding: 14px;
+      display: grid;
+      gap: 10px;
+      align-content: start;
+    }
+
+    button {
+      border: 0;
+      border-radius: 10px;
+      padding: 12px;
+      font-weight: 600;
+      color: #0d1320;
+      background: var(--accent);
+      cursor: pointer;
+    }
+
+    button.alt { background: #8cc7ff; }
+    button.warn { background: var(--warn); }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    .dpad {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+    }
+
+    .dpad button { background: #6bd3ff; }
+    .dpad button.active { background: #36b7f0; box-shadow: inset 0 0 0 2px #0f6f96; }
+    .dpad .empty { visibility: hidden; }
+
+    .hint {
+      margin: 2px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+      text-align: center;
+    }
+
+    @media (max-width: 860px) {
+      main { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>AC13 Web Controller</h1>
+    <div class="status" id="status">Disconnected</div>
+  </header>
+  <main>
+    <div class="video">
+      <img id="stream" src="/api/stream" alt="Rover stream">
+    </div>
+    <div class="panel">
+      <div class="grid">
+        <button id="connect">Connect</button>
+        <button class="alt" id="disconnect">Disconnect</button>
+      </div>
+      <button class="warn" id="infrared">Toggle Infrared</button>
+      <button class="warn" id="stop">Stop</button>
+
+      <div class="dpad">
+        <div class="empty"></div>
+        <button data-move="forward">Forward</button>
+        <div class="empty"></div>
+        <button data-move="left">Left</button>
+        <button data-move="backward">Backward</button>
+        <button data-move="right">Right</button>
+      </div>
+      <p class="hint">Keyboard: W A S D or Arrow Keys. Hold to accelerate command rate.</p>
+    </div>
+  </main>
+</div>
+
+<script>
+  const statusEl = document.getElementById('status');
+  const moveButtons = Object.fromEntries(
+    Array.from(document.querySelectorAll('[data-move]')).map((btn) => [btn.dataset.move, btn])
+  );
+  let activeMove = null;
+  let moveLoopTimer = null;
+  let moveStartTime = 0;
+
+  async function call(path, method = 'POST') {
+    const res = await fetch(path, { method });
+    if (!res.ok) throw new Error(`${method} ${path} failed`);
+    return res.headers.get('content-type')?.includes('application/json') ? res.json() : null;
+  }
+
+  async function refreshStatus() {
+    try {
+      const data = await call('/api/status', 'GET');
+      statusEl.textContent = `${data.connected ? 'Connected' : 'Disconnected'} | Stream: ${data.streaming} | IR: ${data.infrared}`;
+    } catch {
+      statusEl.textContent = 'Controller unavailable';
+    }
+  }
+
+  document.getElementById('connect').addEventListener('click', async () => {
+    await call('/api/connect');
+    refreshStatus();
+  });
+
+  document.getElementById('disconnect').addEventListener('click', async () => {
+    await call('/api/disconnect');
+    refreshStatus();
+  });
+
+  document.getElementById('infrared').addEventListener('click', async () => {
+    await call('/api/infrared/toggle');
+    refreshStatus();
+  });
+
+  document.getElementById('stop').addEventListener('click', () => call('/api/stop'));
+
+  function moveLoopDelay(elapsedMs) {
+    if (elapsedMs < 600) return 220;
+    if (elapsedMs < 1800) return 150;
+    if (elapsedMs < 3500) return 95;
+    return 65;
+  }
+
+  function setActiveButton(move) {
+    Object.values(moveButtons).forEach((btn) => btn.classList.remove('active'));
+    if (move && moveButtons[move]) {
+      moveButtons[move].classList.add('active');
+    }
+  }
+
+  function queueMoveLoop() {
+    if (!activeMove) return;
+    clearTimeout(moveLoopTimer);
+    const elapsed = Date.now() - moveStartTime;
+    moveLoopTimer = setTimeout(async () => {
+      if (!activeMove) return;
+      try {
+        await call(`/api/move/${activeMove}`);
+      } catch {
+      }
+      queueMoveLoop();
+    }, moveLoopDelay(elapsed));
+  }
+
+  function startMove(move) {
+    if (activeMove === move) return;
+    activeMove = move;
+    moveStartTime = Date.now();
+    setActiveButton(move);
+    call(`/api/move/${move}`).catch(() => {});
+    queueMoveLoop();
+  }
+
+  function stopMove() {
+    if (!activeMove) return;
+    activeMove = null;
+    clearTimeout(moveLoopTimer);
+    setActiveButton(null);
+    call('/api/stop').catch(() => {});
+  }
+
+  Object.entries(moveButtons).forEach(([cmd, btn]) => {
+    btn.addEventListener('mousedown', () => startMove(cmd));
+    btn.addEventListener('mouseup', stopMove);
+    btn.addEventListener('mouseleave', stopMove);
+    btn.addEventListener('touchstart', (e) => { e.preventDefault(); startMove(cmd); }, { passive: false });
+    btn.addEventListener('touchend', (e) => { e.preventDefault(); stopMove(); }, { passive: false });
+    btn.addEventListener('touchcancel', (e) => { e.preventDefault(); stopMove(); }, { passive: false });
+  });
+
+  const keyToMove = {
+    ArrowUp: 'forward',
+    ArrowDown: 'backward',
+    ArrowLeft: 'left',
+    ArrowRight: 'right',
+    w: 'forward',
+    s: 'backward',
+    a: 'left',
+    d: 'right'
+  };
+
+  document.addEventListener('keydown', (e) => {
+    const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+    const move = keyToMove[key];
+    if (!move) return;
+    e.preventDefault();
+    if (e.repeat && activeMove === move) return;
+    startMove(move);
+  });
+
+  document.addEventListener('keyup', (e) => {
+    const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+    const move = keyToMove[key];
+    if (!move) return;
+    e.preventDefault();
+    if (activeMove === move) stopMove();
+  });
+
+  window.addEventListener('blur', stopMove);
+
+  refreshStatus();
+  setInterval(refreshStatus, 2000);
+</script>
+</body>
+</html>
