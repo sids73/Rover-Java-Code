@@ -88,7 +88,8 @@ class ErrorPageIntegrationTest {
         assertNotNull(response.getBody());
         assertTrue(response.getBody().contains("\"build\""));
         assertTrue(response.getBody().contains("\"version\":\"1.0.0-SNAPSHOT\""));
-        assertTrue(response.getBody().contains("local"));
+        // commit.hash is "local" by default and the git SHA in CI (-Dcommit.hash=...).
+        assertTrue(response.getBody().matches("(?s).*\"commit\":\\{\"hash\":\"[^\"]+\".*"));
     }
 
     @Test
