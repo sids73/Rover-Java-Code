@@ -4,14 +4,14 @@ Modernized rover controller workspace with a shared communication library, a des
 
 ## Requirements
 
-- Java 26 for normal development builds
+- JDK 25 (all modules compile with `--release 25`; Maven itself may run on JDK 25 or newer)
 - Maven Wrapper, or Maven if you are working before the wrapper is generated
 
-## Maven Toolchains (Coverage Uses JDK 22)
+## Maven Toolchains (Coverage Uses JDK 25)
 
-The `coverage` profile is configured to use JDK 22 through Maven Toolchains.
+The `coverage` profile compiles and runs tests on JDK 25 through Maven Toolchains.
 
-Create `~/.m2/toolchains.xml` with your local JDK 22 path:
+Create `~/.m2/toolchains.xml` with your local JDK 25 path:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -19,19 +19,19 @@ Create `~/.m2/toolchains.xml` with your local JDK 22 path:
 	<toolchain>
 		<type>jdk</type>
 		<provides>
-			<version>22</version>
+			<version>25</version>
 		</provides>
 		<configuration>
-			<jdkHome>/path/to/jdk-22</jdkHome>
+			<jdkHome>/path/to/jdk-25</jdkHome>
 		</configuration>
 	</toolchain>
 </toolchains>
 ```
 
-On macOS, after installing JDK 22 you can discover the path with:
+On macOS, after installing JDK 25 you can discover the path with:
 
 ```bash
-/usr/libexec/java_home -v 22
+/usr/libexec/java_home -v 25
 ```
 
 Coverage now uses that toolchain automatically:
