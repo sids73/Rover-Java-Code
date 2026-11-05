@@ -16,10 +16,11 @@
 
   <properties>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-    <maven.compiler.release>26</maven.compiler.release>
-    <spring.boot.version>3.5.0</spring.boot.version>
+    <maven.compiler.release>25</maven.compiler.release>
+    <java.toolchain.version>25</java.toolchain.version>
+    <spring.boot.version>4.1.2</spring.boot.version>
     <maven.compiler.plugin.version>3.13.0</maven.compiler.plugin.version>
-    <jacoco.version>0.8.12</jacoco.version>
+    <jacoco.version>0.8.16</jacoco.version>
     <checkstyle.version>10.21.3</checkstyle.version>
     <maven.checkstyle.plugin.version>3.5.0</maven.checkstyle.plugin.version>
     <maven.toolchains.plugin.version>3.2.0</maven.toolchains.plugin.version>
@@ -54,9 +55,6 @@
   <profiles>
     <profile>
       <id>quality</id>
-      <properties>
-        <maven.compiler.release>22</maven.compiler.release>
-      </properties>
       <build>
         <plugins>
           <plugin>
@@ -93,9 +91,6 @@
 
     <profile>
       <id>coverage</id>
-      <properties>
-        <maven.compiler.release>22</maven.compiler.release>
-      </properties>
       <build>
         <plugins>
           <plugin>
@@ -112,7 +107,7 @@
                 <configuration>
                   <toolchains>
                     <jdk>
-                      <version>22</version>
+                      <version>${java.toolchain.version}</version>
                     </jdk>
                   </toolchains>
                 </configuration>
@@ -125,7 +120,7 @@
             <version>${maven.compiler.plugin.version}</version>
             <configuration>
               <jdkToolchain>
-                <version>22</version>
+                <version>${java.toolchain.version}</version>
               </jdkToolchain>
             </configuration>
           </plugin>
@@ -135,7 +130,7 @@
             <version>${maven.surefire.plugin.version}</version>
             <configuration>
               <jdkToolchain>
-                <version>22</version>
+                <version>${java.toolchain.version}</version>
               </jdkToolchain>
             </configuration>
           </plugin>

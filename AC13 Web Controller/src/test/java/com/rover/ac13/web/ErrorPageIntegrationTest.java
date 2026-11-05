@@ -3,13 +3,15 @@ package com.rover.ac13.web;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.test.web.client.TestRestTemplate;
+import org.springframework.boot.resttestclient.TestRestTemplate;
+import org.springframework.boot.resttestclient.autoconfigure.AutoConfigureTestRestTemplate;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.http.*;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@AutoConfigureTestRestTemplate
 class ErrorPageIntegrationTest {
 
     @LocalServerPort
@@ -86,7 +88,8 @@ class ErrorPageIntegrationTest {
         assertNotNull(response.getBody());
         assertTrue(response.getBody().contains("\"build\""));
         assertTrue(response.getBody().contains("\"version\":\"1.0.0-SNAPSHOT\""));
-        assertTrue(response.getBody().contains("local"));
+        // commit.hash is "local" by default and the git SHA in CI (-Dcommit.hash=...).
+        assertTrue(response.getBody().matches("(?s).*\"commit\":\\{\"hash\":\"[^\"]+\".*"));
     }
 
     @Test
