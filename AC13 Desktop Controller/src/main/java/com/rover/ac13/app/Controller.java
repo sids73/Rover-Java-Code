@@ -7,8 +7,12 @@ import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
+import java.awt.image.BufferedImage;
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
 import java.util.concurrent.Semaphore;
 
+import javax.imageio.ImageIO;
 import javax.swing.ImageIcon;
 import javax.swing.JButton;
 import javax.swing.JCheckBox;
@@ -199,9 +203,24 @@ public class Controller extends JFrame {
     private void DisplayImage()
     {
     	
-    	ImageIcon image  = new ImageIcon(communicator.GetImageBuffer());
-    	lblImage.setIcon(image);
-	
+    	// Decode with ImageIO rather than new ImageIcon(byte[]): the rover pads its JPEG
+    	// frames before the EOI marker, and the AWT Toolkit decoder behind ImageIcon prints
+    	// "Corrupt JPEG data: N extraneous bytes before marker 0xd9" to stderr for every
+    	// frame. ImageIO decodes the same frames without writing anything to the console.
+    	BufferedImage frame;
+    	try {
+    		frame = ImageIO.read(new ByteArrayInputStream(communicator.GetImageBuffer()));
+    	} catch (IOException e) {
+    		return; // undecodable frame: keep showing the previous one
+    	}
+    	if (frame == null) {
+    		return;
+    	}
+
+    	// Swing components must only be touched on the event dispatch thread.
+    	ImageIcon image = new ImageIcon(frame);
+    	EventQueue.invokeLater(() -> lblImage.setIcon(image));
+
     }
     
     
