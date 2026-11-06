@@ -3,12 +3,14 @@
 
 Reads the MJPEG stream served by the AC13 Web Controller (``GET /api/stream``),
 runs a pre-trained COCO object detector from torchvision on the newest frame,
-and shows the video with labelled boxes. Detections can also be printed as
-JSON lines for other programs to consume.
+and shows the video with labelled boxes. It also posts each frame's
+detections to the web controller (``POST /api/detections``), which draws them
+over the video in the browser, and can print them as JSON lines.
 
-Only read-only endpoints are used, so no API token is needed. Connect to the
-rover first (web page or ``POST /api/connect``); until then the script waits
-and keeps reconnecting to the stream.
+Posting needs the web controller's API token if one is set: pass ``--token``
+or set ``ROVER_API_TOKEN``. Connect to the rover first (web page or
+``POST /api/connect``); until then the script waits and keeps reconnecting to
+the stream.
 
 Run ``python rover_detect.py --prepare`` once while you have internet access:
 it downloads the model weights into the torch cache, so detection works
@@ -19,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import threading
 import time
@@ -133,6 +136,44 @@ class StreamReader(threading.Thread):
             except (urllib.error.URLError, OSError, StreamFormatError) as e:
                 self.status = f"stream error: {e}"
             self._stop_event.wait(self.retry_delay)
+
+
+class DetectionPoster:
+    """Sends detection reports to the web controller so the browser can draw them.
+
+    Prints a line to stderr only when the outcome changes (working, or a new kind
+    of failure), so a missing token or an old server doesn't flood the console.
+    """
+
+    def __init__(self, base_url: str, token: str | None, timeout: float = 1.0) -> None:
+        self.url = base_url.rstrip("/") + "/api/detections"
+        self.token = token
+        self.timeout = timeout
+        self._last_problem: str | None = "not started"
+
+    def post(self, report: dict) -> bool:
+        headers = {"Content-Type": "application/json"}
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+        request = urllib.request.Request(self.url, data=json.dumps(report).encode(), headers=headers, method="POST")
+        problem = None
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout):
+                pass
+        except urllib.error.HTTPError as e:
+            if e.code == 401:
+                problem = "web controller rejected the API token; pass --token or set ROVER_API_TOKEN"
+            elif e.code == 404:
+                problem = "web controller has no /api/detections endpoint; update it to see detections in the browser"
+            else:
+                problem = f"posting detections failed: HTTP {e.code}"
+        except (urllib.error.URLError, OSError) as e:
+            problem = f"posting detections failed: {e}"
+
+        if problem != self._last_problem:
+            print(problem or f"Posting detections to {self.url}", file=sys.stderr)
+            self._last_problem = problem
+        return problem is None
 
 
 # --------------------------------------------------------------------------- #
@@ -250,6 +291,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--classes", help="comma-separated COCO class names to keep, e.g. person,cup,chair")
     p.add_argument("--device", default="auto", help="torch device: auto, cpu, cuda or mps (default: %(default)s)")
     p.add_argument("--json", action="store_true", help="print one JSON line per processed frame to stdout")
+    p.add_argument("--no-post", action="store_true",
+                   help="don't send detections to the web controller for the browser overlay")
+    p.add_argument("--token", help="web controller API token for posting (default: $ROVER_API_TOKEN)")
     p.add_argument("--no-window", action="store_true", help="don't open a video window (use with --json)")
     p.add_argument("--prepare", action="store_true", help="download the model weights and exit")
     p.add_argument("--list-classes", action="store_true", help="print the class names the model knows and exit")
@@ -276,6 +320,7 @@ def main(argv: list[str] | None = None) -> int:
         print("Model weights are cached; detection will now work offline.", file=sys.stderr)
         return 0
 
+    poster = None if args.no_post else DetectionPoster(args.url, args.token or os.environ.get("ROVER_API_TOKEN"))
     frames = LatestFrame()
     reader = StreamReader(args.url, frames)
     reader.start()
@@ -305,14 +350,17 @@ def main(argv: list[str] | None = None) -> int:
             elapsed = time.perf_counter() - started
             fps = 1 / elapsed if fps == 0 else 0.9 * fps + 0.1 / elapsed
 
+            report = {
+                "time": round(time.time(), 3),
+                "frame": last_seq,
+                "width": bgr.shape[1],
+                "height": bgr.shape[0],
+                "detections": [d.to_json() for d in detections],
+            }
+            if poster:
+                poster.post(report)  # an empty list clears the browser overlay
             if args.json:
-                print(json.dumps({
-                    "time": round(time.time(), 3),
-                    "frame": last_seq,
-                    "width": bgr.shape[1],
-                    "height": bgr.shape[0],
-                    "detections": [d.to_json() for d in detections],
-                }), flush=True)
+                print(json.dumps(report), flush=True)
 
             if not args.no_window:
                 draw(cv2, bgr, detections, f"{args.model} {fps:.1f} fps")

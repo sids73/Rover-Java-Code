@@ -10,6 +10,7 @@ import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -50,6 +51,30 @@ class ApiTokenIntegrationTest {
         headers.setBearerAuth("it-secret");
 
         assertEquals(HttpStatus.OK, post("/api/stop", headers).getStatusCode());
+    }
+
+    @Test
+    void detectionsArePostedWithTokenAndReadPublicly() {
+        String report = "{\"frame\": 1, \"width\": 640, \"height\": 480, "
+                + "\"detections\": [{\"label\": \"dog\", \"score\": 0.8, \"box\": [1, 2, 3, 4]}]}";
+        HttpHeaders noToken = new HttpHeaders();
+        noToken.setContentType(MediaType.APPLICATION_JSON);
+        HttpHeaders withToken = new HttpHeaders();
+        withToken.setContentType(MediaType.APPLICATION_JSON);
+        withToken.setBearerAuth("it-secret");
+
+        ResponseEntity<String> rejected = restTemplate.exchange("http://localhost:" + port + "/api/detections",
+                HttpMethod.POST, new HttpEntity<>(report, noToken), String.class);
+        ResponseEntity<String> accepted = restTemplate.exchange("http://localhost:" + port + "/api/detections",
+                HttpMethod.POST, new HttpEntity<>(report, withToken), String.class);
+        ResponseEntity<String> read = restTemplate.getForEntity(
+                "http://localhost:" + port + "/api/detections", String.class);
+
+        assertEquals(HttpStatus.UNAUTHORIZED, rejected.getStatusCode());
+        assertEquals(HttpStatus.NO_CONTENT, accepted.getStatusCode());
+        assertEquals(HttpStatus.OK, read.getStatusCode());
+        assertNotNull(read.getBody());
+        assertTrue(read.getBody().contains("\"label\":\"dog\""));
     }
 
     @Test

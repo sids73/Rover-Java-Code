@@ -119,9 +119,10 @@ A Spring Boot 4 web app (`spring-boot-starter-webmvc` and `actuator`) on port `8
 
 - **`RoverService`**: a singleton that owns one `AC13Comunicator`. Its command methods are `synchronized`, so requests arriving at the same time don't send commands to the rover at the same time. `currentFrame()` returns the newest frame without waiting, or `null` when the rover isn't connected or streaming. `nextFrame(afterSequence, timeout)` waits for a newer frame; each `/api/stream` client uses it independently, so every client gets every frame exactly once. Its `@PreDestroy` hook closes the connection when the app shuts down.
 - **`RoverController`**: the REST endpoints, listed below.
+- **`DetectionController`** and **`DetectionService`**: receive object detections from an external recognizer and serve the latest report to the page (see [Image Recognition](#image-recognition)). Reports are checked before they're stored: size, labels, scores from 0 to 1, four-number boxes, and at most 100 detections.
 - **`ApiTokenFilter`**: when an API token is configured, checks the `Authorization: Bearer <token>` header on mutating `/api/` requests (see [Authentication](#authentication)).
 - **`CorrelationIdFilter`**: runs first. It reads the `X-Correlation-Id` header, or makes a UUID if there isn't one. It stores it on the request and echoes it in the response. The Tomcat access log also prints it.
-- **`ApiExceptionHandler`** and **`ApiError`**: for `RoverController` routes, turn exceptions into JSON. Bad input, such as an unknown move direction, returns `400`. Anything else returns `500`. The JSON looks like `{timestamp, status, error, message, path, correlationId}`.
+- **`ApiExceptionHandler`** and **`ApiError`**: for `RoverController` and `DetectionController` routes, turn exceptions into JSON. Bad input, such as an unknown move direction or a malformed request body, returns `400`. Anything else returns `500`. The JSON looks like `{timestamp, status, error, message, path, correlationId}`.
 
 **REST API**
 
@@ -135,6 +136,8 @@ A Spring Boot 4 web app (`spring-boot-starter-webmvc` and `actuator`) on port `8
 | `POST` | `/api/stop` | Stops all movement. |
 | `GET` | `/api/frame` | The latest frame as `image/jpeg`, or `503` if there is none. |
 | `GET` | `/api/stream` | A continuous MJPEG stream (`multipart/x-mixed-replace; boundary=frame`). When no frames are coming in, it checks again every 100 ms and closes the stream after 5 seconds. Both times can be changed with `rover.stream.poll-interval-ms` and `rover.stream.idle-timeout-ms`. |
+| `POST` | `/api/detections` | Stores a detection report: `{frame, width, height, detections: [{label, score, box: [x1, y1, x2, y2]}]}`. Returns `204`, or `400` if the report is invalid. |
+| `GET` | `/api/detections` | The latest report plus `receivedAt` and `ageMs`, or `204` if none has been posted. |
 
 **Browser UI** ([`static/index.html`](AC13%20Web%20Controller/src/main/resources/static/index.html))
 
@@ -143,6 +146,7 @@ A Spring Boot 4 web app (`spring-boot-starter-webmvc` and `actuator`) on port `8
 - The move, stop and infrared buttons and the keyboard controls are disabled unless the rover is connected and no action is in progress.
 - If connecting fails with `502`, the page says the rover couldn't be reached.
 - If the server answers `401`, the page asks for the API token once and saves it in the browser's `localStorage`.
+- While connected, it asks for `/api/detections` every 200 ms and draws the boxes and labels on a `<canvas>` over the video. The boxes are scaled the same way the video is fitted into its frame. Boxes from a report older than 1.5 seconds aren't drawn, so they disappear soon after the recognizer stops. The **Show detections** checkbox turns the overlay off (the choice is saved in the browser), and a line under the controls lists what was recognized.
 - Movement works by holding a button (mouse or touch) or a key (arrow keys or WASD). While held, the page keeps sending the move command, faster the longer it's held: every 220 ms at first, then every 65 ms. Releasing the control, or leaving the window, sends `/api/stop`.
 - Custom `404.html` and `500.html` pages in `public/error/` replace Spring's default error page.
 
@@ -171,7 +175,7 @@ The `spring-boot-maven-plugin` `build-info` goal adds a `commit.hash` property t
 
 [`recognition/rover_detect.py`](recognition/rover_detect.py) is a Python script that detects objects in the rover's camera feed. It recognizes the 80 everyday object types of the COCO dataset: people, cups, chairs, bottles, cats, dogs and so on.
 
-It reads the web controller's `/api/stream`, runs a pre-trained torchvision detector on each frame, and shows the video with labelled boxes. It needs no changes to the Java code. It only uses `GET` endpoints, so it doesn't need the API token.
+It reads the web controller's `/api/stream`, runs a pre-trained torchvision detector on each frame, and shows the video with labelled boxes in its own window. It also posts each frame's results to the web controller's `POST /api/detections`, so the **browser page draws the same boxes over its video**.
 
 **How it works**
 
@@ -197,7 +201,13 @@ recognition/.venv/bin/python recognition/rover_detect.py --prepare
 recognition/.venv/bin/python recognition/rover_detect.py
 ```
 
-Press `q` or `Esc` in the window to quit. Useful options:
+If the web controller has an API token set, posting detections needs it too. The script reads the same `ROVER_API_TOKEN` environment variable, or you can pass `--token`:
+
+```bash
+ROVER_API_TOKEN=your-token-here recognition/.venv/bin/python recognition/rover_detect.py
+```
+
+The script prints one line when posting starts working or fails, for example if the token is wrong. To show the boxes only in the browser, add `--no-window`. Press `q` or `Esc` in the window to quit. Useful options:
 
 | Option | Effect |
 |---|---|
@@ -206,10 +216,12 @@ Press `q` or `Esc` in the window to quit. Useful options:
 | `--threshold 0.6` | Minimum confidence, 0–1 (default 0.5). |
 | `--model fasterrcnn` | Use the slower, more accurate model. Run `--prepare` with it first. |
 | `--json` | Print one JSON line per frame: `{"time", "frame", "width", "height", "detections": [{"label", "score", "box": [x1, y1, x2, y2]}]}`. |
-| `--no-window` | Don't open a window (use with `--json`, e.g. to feed another program). |
+| `--no-window` | Don't open a window. The browser overlay still works. |
+| `--no-post` | Don't send detections to the web controller. |
+| `--token TOKEN` | API token for posting (default: `$ROVER_API_TOKEN`). |
 | `--device mps` | Run on another torch device. The default is `cpu` (or `cuda` if available). The Apple Silicon GPU (`mps`) works, but it isn't faster for the default model. It may help with `fasterrcnn`. |
 
-**Tests** (stream parsing and frame handoff; no PyTorch needed):
+**Tests** (stream parsing, frame handoff and posting; no PyTorch needed):
 
 ```bash
 cd recognition && python3 -m unittest -v test_rover_detect
@@ -282,7 +294,7 @@ Run the quality build:
 
 ## Testing and Quality Gates
 
-- **Tests**: The library tests are in `AC13ComunicatorTest`. The web module has unit tests for the service, controller and exception handler, plus the token filter (`ApiTokenFilterTest`). Spring Boot integration tests cover the error pages and actuator endpoints (`ErrorPageIntegrationTest`) and the token check with a token configured (`ApiTokenIntegrationTest`). The tests don't need real rover hardware: the communicator is passed into `RoverService` through a package-private constructor, so tests can swap it out. Surefire loads the Byte Buddy agent so Mockito can mock classes on JDK 25.
+- **Tests**: The library tests are in `AC13ComunicatorTest`. The web module has unit tests for the service, controller and exception handler, plus the token filter (`ApiTokenFilterTest`) and the detection endpoints (`DetectionControllerTest`, `DetectionServiceTest`). Spring Boot integration tests cover the error pages and actuator endpoints (`ErrorPageIntegrationTest`), and the token check and a detection round trip with a token configured (`ApiTokenIntegrationTest`). The tests don't need real rover hardware: the communicator is passed into `RoverService` through a package-private constructor, so tests can swap it out. Surefire loads the Byte Buddy agent so Mockito can mock classes on JDK 25.
 - **`coverage` profile**: Runs JaCoCo, and the build fails unless the `com.rover.ac13.web` package has **100% instruction and branch coverage**.
 - **`quality` profile**: Runs Checkstyle with [`checkstyle.xml`](checkstyle.xml) on main and test sources. Any violation fails the build.
 

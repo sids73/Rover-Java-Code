@@ -6,14 +6,18 @@ Pillow and NumPy and are skipped when those aren't installed.
 Run with:  python -m unittest test_rover_detect
 """
 
+import contextlib
 import importlib.util
 import io
+import json
 import os
+import socket
 import tempfile
 import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
-from rover_detect import LatestFrame, StreamFormatError, decode_jpeg, iter_mjpeg_frames
+from rover_detect import DetectionPoster, LatestFrame, StreamFormatError, decode_jpeg, iter_mjpeg_frames
 
 HAVE_PIL_AND_NUMPY = all(importlib.util.find_spec(m) for m in ("PIL", "numpy"))
 
@@ -93,6 +97,104 @@ class LatestFrameTest(unittest.TestCase):
         reader.join(5)
 
         self.assertEqual(result, [(1, b"jpeg")])
+
+
+class FakeDetectionsServer:
+    """Local server that records POST /api/detections and answers with a chosen status."""
+
+    def __init__(self, status: int = 204):
+        self.status = status
+        self.requests = []
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers["Content-Length"]))
+                outer.requests.append((self.path, dict(self.headers), json.loads(body)))
+                self.send_response(outer.status)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        self.server = HTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self.server.server_port}"
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+class DetectionPosterTest(unittest.TestCase):
+
+    REPORT = {"frame": 1, "width": 640, "height": 480,
+              "detections": [{"label": "cup", "score": 0.9, "box": [1, 2, 3, 4]}]}
+
+    def server(self, status=204):
+        server = FakeDetectionsServer(status)
+        self.addCleanup(server.close)
+        return server
+
+    @staticmethod
+    def post_capturing_stderr(poster, report):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            ok = poster.post(report)
+        return ok, err.getvalue()
+
+    def test_posts_report_as_json_with_bearer_token(self):
+        server = self.server()
+
+        ok, _ = self.post_capturing_stderr(DetectionPoster(server.url + "/", "s3cret"), self.REPORT)
+
+        self.assertTrue(ok)
+        path, headers, body = server.requests[0]
+        self.assertEqual(path, "/api/detections")
+        self.assertEqual(headers["Authorization"], "Bearer s3cret")
+        self.assertEqual(headers["Content-Type"], "application/json")
+        self.assertEqual(body, self.REPORT)
+
+    def test_sends_no_authorization_header_without_token(self):
+        server = self.server()
+
+        self.post_capturing_stderr(DetectionPoster(server.url, None), self.REPORT)
+
+        self.assertNotIn("Authorization", server.requests[0][1])
+
+    def test_reports_only_changes_in_outcome(self):
+        server = self.server()
+        poster = DetectionPoster(server.url, None)
+
+        _, first = self.post_capturing_stderr(poster, self.REPORT)
+        _, second = self.post_capturing_stderr(poster, self.REPORT)
+        server.status = 401
+        ok, third = self.post_capturing_stderr(poster, self.REPORT)
+        _, fourth = self.post_capturing_stderr(poster, self.REPORT)
+
+        self.assertIn("Posting detections to", first)
+        self.assertEqual(second, "")
+        self.assertFalse(ok)
+        self.assertIn("rejected the API token", third)
+        self.assertEqual(fourth, "")
+
+    def test_explains_missing_endpoint_and_other_http_errors(self):
+        _, not_found = self.post_capturing_stderr(DetectionPoster(self.server(404).url, None), self.REPORT)
+        _, server_error = self.post_capturing_stderr(DetectionPoster(self.server(500).url, None), self.REPORT)
+
+        self.assertIn("no /api/detections endpoint", not_found)
+        self.assertIn("HTTP 500", server_error)
+
+    def test_handles_unreachable_server(self):
+        with socket.socket() as s:  # find a port with nothing listening
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+
+        ok, err = self.post_capturing_stderr(DetectionPoster(f"http://127.0.0.1:{port}", None), self.REPORT)
+
+        self.assertFalse(ok)
+        self.assertIn("posting detections failed", err)
 
 
 @unittest.skipUnless(HAVE_PIL_AND_NUMPY, "needs Pillow and NumPy")

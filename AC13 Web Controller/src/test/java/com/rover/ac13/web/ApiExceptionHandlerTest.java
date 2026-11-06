@@ -4,6 +4,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -30,6 +31,20 @@ class ApiExceptionHandlerTest {
         assertEquals("Invalid parameter: speed", response.getBody().message());
         assertEquals("/api/move/forward", response.getBody().path());
         assertEquals("corr-type", response.getBody().correlationId());
+    }
+
+    @Test
+    void handleUnreadableBodyReturnsBadRequest() {
+        HttpServletRequest request = mockRequest("/api/detections", "corr-body");
+
+        ResponseEntity<ApiError> response = handler.handleUnreadableBody(
+                mock(HttpMessageNotReadableException.class), request);
+
+        assertEquals(HttpStatus.BAD_REQUEST, response.getStatusCode());
+        assertNotNull(response.getBody());
+        assertEquals("Malformed request body", response.getBody().message());
+        assertEquals("/api/detections", response.getBody().path());
+        assertEquals("corr-body", response.getBody().correlationId());
     }
 
     @Test

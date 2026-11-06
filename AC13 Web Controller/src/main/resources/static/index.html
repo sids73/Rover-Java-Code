@@ -82,6 +82,29 @@
 
     .video img:not([src]) { visibility: hidden; }
 
+    .video canvas {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+    }
+
+    .toggle {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      color: var(--muted);
+      cursor: pointer;
+    }
+
+    .detection-info {
+      margin: 0;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
     .video .overlay {
       position: absolute;
       inset: 0;
@@ -181,6 +204,7 @@
   <main>
     <div class="video">
       <img id="stream" alt="Rover stream">
+      <canvas id="detections" aria-hidden="true"></canvas>
       <div class="overlay" id="overlay">Not connected</div>
     </div>
     <div class="panel">
@@ -199,6 +223,8 @@
         <button data-move="backward">Backward</button>
         <button data-move="right">Right</button>
       </div>
+      <label class="toggle"><input type="checkbox" id="show-detections" checked> Show detections</label>
+      <p class="detection-info" id="detection-info" aria-live="polite"></p>
       <p class="message" id="message" role="alert"></p>
       <p class="hint">Keyboard: W A S D or Arrow Keys. Hold to accelerate command rate.</p>
     </div>
@@ -426,8 +452,98 @@
 
   window.addEventListener('blur', stopMove);
 
+  // ---- Object detection overlay -------------------------------------------
+  // An external recognizer (recognition/rover_detect.py) posts what it sees to
+  // /api/detections; we poll it and draw the boxes over the video.
+  const detectionCanvas = document.getElementById('detections');
+  const detectionCtx = detectionCanvas.getContext('2d');
+  const showDetectionsEl = document.getElementById('show-detections');
+  const detectionInfoEl = document.getElementById('detection-info');
+  const SHOW_DETECTIONS_KEY = 'rover-show-detections';
+  const DETECTION_POLL_MS = 200;
+  const DETECTION_STALE_MS = 1500;
+  let latestDetections = null;
+
+  try { showDetectionsEl.checked = localStorage.getItem(SHOW_DETECTIONS_KEY) !== 'false'; } catch { /* default on */ }
+  showDetectionsEl.addEventListener('change', () => {
+    try { localStorage.setItem(SHOW_DETECTIONS_KEY, String(showDetectionsEl.checked)); } catch { /* ignore */ }
+    drawDetections();
+  });
+
+  async function pollDetections() {
+    if (connected && showDetectionsEl.checked) {
+      try {
+        const res = await fetch('/api/detections', { cache: 'no-store' });
+        latestDetections = res.status === 200 ? await res.json() : null;
+      } catch {
+        latestDetections = null;
+      }
+    } else {
+      latestDetections = null;
+    }
+    drawDetections();
+    setTimeout(pollDetections, DETECTION_POLL_MS);
+  }
+
+  function describeDetections(report) {
+    if (!connected || !showDetectionsEl.checked) return '';
+    if (!report || report.ageMs > DETECTION_STALE_MS) return 'Recognition: not running';
+    if (report.detections.length === 0) return 'Recognition: nothing detected';
+    const counts = {};
+    report.detections.forEach((d) => { counts[d.label] = (counts[d.label] || 0) + 1; });
+    return 'Recognition: ' + Object.entries(counts)
+      .map(([label, n]) => (n > 1 ? `${n} × ${label}` : label))
+      .join(', ');
+  }
+
+  function drawDetections() {
+    const rect = detectionCanvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    const width = Math.round(rect.width * dpr);
+    const height = Math.round(rect.height * dpr);
+    if (detectionCanvas.width !== width || detectionCanvas.height !== height) {
+      detectionCanvas.width = width;
+      detectionCanvas.height = height;
+    }
+    detectionCtx.setTransform(1, 0, 0, 1, 0, 0);
+    detectionCtx.clearRect(0, 0, width, height);
+
+    const report = latestDetections;
+    detectionInfoEl.textContent = describeDetections(report);
+    if (!connected || !showDetectionsEl.checked || !report || report.ageMs > DETECTION_STALE_MS) return;
+
+    // The video uses object-fit: contain, so map frame pixels the same way.
+    const scale = Math.min(rect.width / report.width, rect.height / report.height);
+    const offsetX = (rect.width - report.width * scale) / 2;
+    const offsetY = (rect.height - report.height * scale) / 2;
+
+    detectionCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    detectionCtx.lineWidth = 2;
+    detectionCtx.font = '600 12px "Segoe UI", sans-serif';
+    detectionCtx.textBaseline = 'top';
+    report.detections.forEach((d) => {
+      const [x1, y1, x2, y2] = d.box;
+      const x = offsetX + x1 * scale;
+      const y = offsetY + y1 * scale;
+      detectionCtx.strokeStyle = '#ffd166';
+      detectionCtx.strokeRect(x, y, (x2 - x1) * scale, (y2 - y1) * scale);
+
+      const text = `${d.label} ${Math.round(d.score * 100)}%`;
+      const labelWidth = detectionCtx.measureText(text).width + 8;
+      const labelHeight = 16;
+      const labelY = y - labelHeight >= 0 ? y - labelHeight : y;
+      detectionCtx.fillStyle = '#ffd166';
+      detectionCtx.fillRect(x, labelY, labelWidth, labelHeight);
+      detectionCtx.fillStyle = '#0d1320';
+      detectionCtx.fillText(text, x + 4, labelY + 2);
+    });
+  }
+
+  window.addEventListener('resize', drawDetections);
+
   refreshStatus();
   setInterval(refreshStatus, 2000);
+  pollDetections();
 </script>
 </body>
 </html>
