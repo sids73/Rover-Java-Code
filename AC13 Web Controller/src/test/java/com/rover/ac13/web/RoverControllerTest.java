@@ -166,7 +166,7 @@ class RoverControllerTest {
             }
         };
 
-        RoverController controller = new RoverController(service);
+        RoverController controller = new RoverController(service, 5000, 1);
 
         assertThrows(IOException.class, () -> controller.stream(response));
         verify(service, atLeast(2)).currentFrame();
@@ -180,7 +180,7 @@ class RoverControllerTest {
     void streamReturnsImmediatelyWhenThreadAlreadyInterrupted() throws Exception {
         RoverService service = mock(RoverService.class);
         HttpServletResponse response = new MockHttpServletResponse();
-        RoverController controller = new RoverController(service);
+        RoverController controller = new RoverController(service, 5000, 1);
 
         Thread.currentThread().interrupt();
         try {
@@ -204,11 +204,42 @@ class RoverControllerTest {
             }
         };
 
-        RoverController controller = new RoverController(service);
+        RoverController controller = new RoverController(service, 5000, 1);
 
         controller.stream(response);
 
         verify(service, atLeastOnce()).currentFrame();
+    }
+
+    @Test
+    void streamEndsWhenNoFrameArrivesBeforeIdleTimeout() throws Exception {
+        RoverService service = mock(RoverService.class);
+        when(service.currentFrame()).thenReturn(null);
+        MockHttpServletResponse response = new MockHttpServletResponse();
+
+        new RoverController(service, 20, 1).stream(response);
+
+        verify(service, atLeast(2)).currentFrame();
+        org.junit.jupiter.api.Assertions.assertEquals(0, response.getContentAsByteArray().length);
+    }
+
+    @Test
+    void streamStopsWhenInterruptedWhileWaitingForFrame() throws Exception {
+        RoverService service = mock(RoverService.class);
+        when(service.currentFrame()).thenAnswer(invocation -> {
+            Thread.currentThread().interrupt();
+            return null;
+        });
+        RoverController controller = new RoverController(service, 5000, 1000);
+
+        try {
+            controller.stream(new MockHttpServletResponse());
+            org.junit.jupiter.api.Assertions.assertTrue(Thread.currentThread().isInterrupted());
+        } finally {
+            Thread.interrupted();
+        }
+
+        verify(service, times(1)).currentFrame();
     }
 
     static class ExplodingServletOutputStream extends ServletOutputStream {

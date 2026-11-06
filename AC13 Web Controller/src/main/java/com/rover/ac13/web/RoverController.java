@@ -2,6 +2,7 @@ package com.rover.ac13.web;
 
 import jakarta.servlet.ServletOutputStream;
 import jakarta.servlet.http.HttpServletResponse;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -9,6 +10,7 @@ import org.springframework.web.bind.annotation.*;
 
 import java.io.IOException;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 @RestController
 public class RoverController {
@@ -17,9 +19,16 @@ public class RoverController {
     private static final String BOUNDARY = "frame";
 
     private final RoverService roverService;
+    private final long idleTimeoutNanos;
+    private final long pollIntervalMillis;
 
-    public RoverController(RoverService roverService) {
+    public RoverController(
+            RoverService roverService,
+            @Value("${rover.stream.idle-timeout-ms:5000}") long idleTimeoutMillis,
+            @Value("${rover.stream.poll-interval-ms:100}") long pollIntervalMillis) {
         this.roverService = roverService;
+        this.idleTimeoutNanos = TimeUnit.MILLISECONDS.toNanos(idleTimeoutMillis);
+        this.pollIntervalMillis = pollIntervalMillis;
     }
 
     @GetMapping("/api/status")
@@ -76,12 +85,25 @@ public class RoverController {
         response.setHeader("Pragma", "no-cache");
 
         ServletOutputStream out = response.getOutputStream();
+        long idleSince = System.nanoTime();
 
         while (!Thread.currentThread().isInterrupted()) {
             byte[] frame = roverService.currentFrame();
             if (frame == null) {
+                // No frame (e.g. rover disconnected). Back off instead of spinning, and end the
+                // response after a while so the request thread is released; the UI reconnects.
+                if (System.nanoTime() - idleSince >= idleTimeoutNanos) {
+                    return;
+                }
+                try {
+                    Thread.sleep(pollIntervalMillis);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
                 continue;
             }
+            idleSince = System.nanoTime();
 
             out.write(("--" + BOUNDARY + "\r\n").getBytes());
             out.write("Content-Type: image/jpeg\r\n".getBytes());

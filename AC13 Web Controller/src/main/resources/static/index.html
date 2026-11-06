@@ -54,7 +54,45 @@
     .status {
       color: var(--muted);
       font-size: 14px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
     }
+
+    .status::before {
+      content: "";
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #6b7280;
+    }
+
+    .status[data-state="connected"]::before { background: #34d399; }
+    .status[data-state="busy"]::before { background: var(--warn); }
+    .status[data-state="error"]::before { background: #f87171; }
+
+    .message {
+      min-height: 1.2em;
+      margin: 0;
+      font-size: 13px;
+      color: #fca5a5;
+    }
+
+    .video { position: relative; }
+
+    .video img:not([src]) { visibility: hidden; }
+
+    .video .overlay {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      color: var(--muted);
+      font-size: 14px;
+      pointer-events: none;
+    }
+
+    .video .overlay[hidden] { display: none; }
 
     main {
       display: grid;
@@ -98,6 +136,11 @@
       cursor: pointer;
     }
 
+    button:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+
     button.alt { background: #8cc7ff; }
     button.warn { background: var(--warn); }
 
@@ -133,11 +176,12 @@
 <div class="wrap">
   <header>
     <h1>AC13 Web Controller</h1>
-    <div class="status" id="status">Disconnected</div>
+    <div class="status" id="status" data-state="idle" role="status" aria-live="polite">Disconnected</div>
   </header>
   <main>
     <div class="video">
-      <img id="stream" src="/api/stream" alt="Rover stream">
+      <img id="stream" alt="Rover stream">
+      <div class="overlay" id="overlay">Not connected</div>
     </div>
     <div class="panel">
       <div class="grid">
@@ -155,6 +199,7 @@
         <button data-move="backward">Backward</button>
         <button data-move="right">Right</button>
       </div>
+      <p class="message" id="message" role="alert"></p>
       <p class="hint">Keyboard: W A S D or Arrow Keys. Hold to accelerate command rate.</p>
     </div>
   </main>
@@ -162,44 +207,140 @@
 
 <script>
   const statusEl = document.getElementById('status');
+  const messageEl = document.getElementById('message');
+  const streamEl = document.getElementById('stream');
+  const overlayEl = document.getElementById('overlay');
+  const connectBtn = document.getElementById('connect');
+  const disconnectBtn = document.getElementById('disconnect');
+  const infraredBtn = document.getElementById('infrared');
+  const stopBtn = document.getElementById('stop');
   const moveButtons = Object.fromEntries(
     Array.from(document.querySelectorAll('[data-move]')).map((btn) => [btn.dataset.move, btn])
   );
+  const TOKEN_KEY = 'rover-api-token';
   let activeMove = null;
   let moveLoopTimer = null;
   let moveStartTime = 0;
+  let connected = false;
+  let busy = false;
+  let streamRetryTimer = null;
 
-  async function call(path, method = 'POST') {
-    const res = await fetch(path, { method });
-    if (!res.ok) throw new Error(`${method} ${path} failed`);
-    return res.headers.get('content-type')?.includes('application/json') ? res.json() : null;
+  function readToken() {
+    try { return localStorage.getItem(TOKEN_KEY) || ''; } catch { return ''; }
   }
 
-  async function refreshStatus() {
-    try {
-      const data = await call('/api/status', 'GET');
-      statusEl.textContent = `${data.connected ? 'Connected' : 'Disconnected'} | Stream: ${data.streaming} | IR: ${data.infrared}`;
-    } catch {
+  function saveToken(token) {
+    try { localStorage.setItem(TOKEN_KEY, token); } catch { /* storage unavailable */ }
+  }
+
+  let apiToken = readToken();
+
+  async function call(path, method = 'POST', retried = false) {
+    const headers = {};
+    if (method !== 'GET' && apiToken) headers.Authorization = `Bearer ${apiToken}`;
+    const res = await fetch(path, { method, headers });
+    if (res.status === 401 && !retried) {
+      const entered = window.prompt('This rover controller needs an API token:');
+      if (entered) {
+        apiToken = entered.trim();
+        saveToken(apiToken);
+        return call(path, method, true);
+      }
+    }
+    const body = res.headers.get('content-type')?.includes('application/json') ? await res.json() : null;
+    if (!res.ok) {
+      const err = new Error(body?.message || `${method} ${path} failed (${res.status})`);
+      err.status = res.status;
+      err.body = body;
+      throw err;
+    }
+    return body;
+  }
+
+  function showMessage(text) {
+    messageEl.textContent = text || '';
+  }
+
+  function render(data) {
+    connected = Boolean(data?.connected);
+    if (busy) {
+      statusEl.dataset.state = 'busy';
+    } else if (data === null) {
+      statusEl.dataset.state = 'error';
       statusEl.textContent = 'Controller unavailable';
+    } else {
+      statusEl.dataset.state = connected ? 'connected' : 'idle';
+      statusEl.textContent = connected
+        ? `Connected | Stream: ${data.streaming ? 'on' : 'off'} | IR: ${data.infrared}`
+        : 'Disconnected';
+    }
+
+    const controlsEnabled = connected && !busy;
+    connectBtn.disabled = connected || busy || data === null;
+    disconnectBtn.disabled = !connected || busy;
+    infraredBtn.disabled = !controlsEnabled;
+    stopBtn.disabled = !controlsEnabled;
+    Object.values(moveButtons).forEach((btn) => { btn.disabled = !controlsEnabled; });
+    if (!controlsEnabled) stopMove();
+
+    syncStream();
+  }
+
+  function syncStream() {
+    if (connected) {
+      overlayEl.hidden = true;
+      if (!streamEl.getAttribute('src')) startStream();
+    } else {
+      clearTimeout(streamRetryTimer);
+      streamEl.removeAttribute('src');
+      overlayEl.textContent = 'Not connected';
+      overlayEl.hidden = false;
     }
   }
 
-  document.getElementById('connect').addEventListener('click', async () => {
-    await call('/api/connect');
-    refreshStatus();
-  });
+  function startStream() {
+    clearTimeout(streamRetryTimer);
+    streamEl.src = `/api/stream?t=${Date.now()}`;
+  }
 
-  document.getElementById('disconnect').addEventListener('click', async () => {
-    await call('/api/disconnect');
-    refreshStatus();
+  // The server ends an idle stream; retry while still connected.
+  streamEl.addEventListener('error', () => {
+    if (!connected) return;
+    overlayEl.textContent = 'Stream interrupted, reconnecting…';
+    overlayEl.hidden = false;
+    streamEl.removeAttribute('src');
+    clearTimeout(streamRetryTimer);
+    streamRetryTimer = setTimeout(() => { if (connected) startStream(); }, 2000);
   });
+  streamEl.addEventListener('load', () => { overlayEl.hidden = true; });
 
-  document.getElementById('infrared').addEventListener('click', async () => {
-    await call('/api/infrared/toggle');
-    refreshStatus();
-  });
+  async function refreshStatus() {
+    try {
+      render(await call('/api/status', 'GET'));
+    } catch {
+      render(null);
+    }
+  }
 
-  document.getElementById('stop').addEventListener('click', () => call('/api/stop'));
+  async function runAction(label, path) {
+    busy = true;
+    statusEl.textContent = label;
+    render({ connected });
+    showMessage('');
+    try {
+      await call(path);
+    } catch (err) {
+      showMessage(err.status === 502 ? 'Could not reach the rover. Is this computer on its Wi-Fi?' : err.message);
+    } finally {
+      busy = false;
+      await refreshStatus();
+    }
+  }
+
+  connectBtn.addEventListener('click', () => runAction('Connecting…', '/api/connect'));
+  disconnectBtn.addEventListener('click', () => runAction('Disconnecting…', '/api/disconnect'));
+  infraredBtn.addEventListener('click', () => runAction('Switching infrared…', '/api/infrared/toggle'));
+  stopBtn.addEventListener('click', () => call('/api/stop').catch((err) => showMessage(err.message)));
 
   function moveLoopDelay(elapsedMs) {
     if (elapsedMs < 600) return 220;
@@ -230,7 +371,7 @@
   }
 
   function startMove(move) {
-    if (activeMove === move) return;
+    if (activeMove === move || !connected || busy) return;
     activeMove = move;
     moveStartTime = Date.now();
     setActiveButton(move);
