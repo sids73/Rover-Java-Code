@@ -1,9 +1,11 @@
 package com.rover.ac13.web;
 
 import com.rover.ac13.AC13Comunicator;
+import com.rover.ac13.Frame;
+import com.rover.ac13.FrameExchange;
 import org.junit.jupiter.api.Test;
 
-import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -13,7 +15,7 @@ class RoverServiceTest {
     void connectReturnsTrueWhenAlreadyConnected() {
         FakeComunicator fake = new FakeComunicator();
         fake.connected = true;
-        RoverService service = new RoverService(fake, new Semaphore(0));
+        RoverService service = new RoverService(fake);
 
         assertTrue(service.connect());
         assertEquals(0, fake.connectCalls);
@@ -24,7 +26,7 @@ class RoverServiceTest {
         FakeComunicator fake = new FakeComunicator();
         fake.connected = false;
         fake.connectResult = false;
-        RoverService service = new RoverService(fake, new Semaphore(0));
+        RoverService service = new RoverService(fake);
 
         assertFalse(service.connect());
         assertEquals(1, fake.connectCalls);
@@ -34,7 +36,7 @@ class RoverServiceTest {
     void disconnectReturnsTrueWhenAlreadyDisconnected() {
         FakeComunicator fake = new FakeComunicator();
         fake.connected = false;
-        RoverService service = new RoverService(fake, new Semaphore(0));
+        RoverService service = new RoverService(fake);
 
         assertTrue(service.disconnect());
         assertEquals(0, fake.disconnectCalls);
@@ -45,7 +47,7 @@ class RoverServiceTest {
         FakeComunicator fake = new FakeComunicator();
         fake.connected = true;
         fake.disconnectResult = false;
-        RoverService service = new RoverService(fake, new Semaphore(0));
+        RoverService service = new RoverService(fake);
 
         assertFalse(service.disconnect());
         assertEquals(1, fake.disconnectCalls);
@@ -54,7 +56,7 @@ class RoverServiceTest {
     @Test
     void moveDispatchesToCorrectCommands() {
         FakeComunicator fake = new FakeComunicator();
-        RoverService service = new RoverService(fake, new Semaphore(0));
+        RoverService service = new RoverService(fake);
 
         service.move("forward");
         service.move("backward");
@@ -70,7 +72,7 @@ class RoverServiceTest {
     @Test
     void moveRejectsUnknownCommand() {
         FakeComunicator fake = new FakeComunicator();
-        RoverService service = new RoverService(fake, new Semaphore(0));
+        RoverService service = new RoverService(fake);
 
         assertThrows(IllegalArgumentException.class, () -> service.move("spin"));
     }
@@ -81,7 +83,7 @@ class RoverServiceTest {
         fake.connected = true;
         fake.streaming = true;
         fake.infrared = "On";
-        RoverService service = new RoverService(fake, new Semaphore(0));
+        RoverService service = new RoverService(fake);
 
         var status = service.status();
 
@@ -93,7 +95,7 @@ class RoverServiceTest {
     @Test
     void toggleInfraredDelegates() {
         FakeComunicator fake = new FakeComunicator();
-        RoverService service = new RoverService(fake, new Semaphore(0));
+        RoverService service = new RoverService(fake);
 
         service.toggleInfrared();
 
@@ -103,7 +105,7 @@ class RoverServiceTest {
     @Test
     void stopDelegates() {
         FakeComunicator fake = new FakeComunicator();
-        RoverService service = new RoverService(fake, new Semaphore(0));
+        RoverService service = new RoverService(fake);
 
         service.stop();
 
@@ -115,8 +117,8 @@ class RoverServiceTest {
         FakeComunicator fake = new FakeComunicator();
         fake.connected = false;
         fake.streaming = true;
-        fake.frame = new byte[] {1, 2, 3};
-        RoverService service = new RoverService(fake, new Semaphore(0));
+        fake.frames.publish(new byte[] {1, 2, 3}, 0, 3);
+        RoverService service = new RoverService(fake);
 
         assertNull(service.currentFrame());
     }
@@ -126,79 +128,50 @@ class RoverServiceTest {
         FakeComunicator fake = new FakeComunicator();
         fake.connected = true;
         fake.streaming = false;
-        fake.frame = new byte[] {1, 2, 3};
-        RoverService service = new RoverService(fake, new Semaphore(1));
+        fake.frames.publish(new byte[] {1, 2, 3}, 0, 3);
+        RoverService service = new RoverService(fake);
 
         assertNull(service.currentFrame());
     }
 
     @Test
-    void currentFrameReturnsNullWhenBufferIsNull() {
+    void currentFrameReturnsNullBeforeFirstFrame() {
         FakeComunicator fake = new FakeComunicator();
         fake.connected = true;
         fake.streaming = true;
-        fake.frame = null;
-        RoverService service = new RoverService(fake, new Semaphore(1));
+        RoverService service = new RoverService(fake);
 
         assertNull(service.currentFrame());
     }
 
     @Test
-    void currentFrameReturnsImageWhenConnectedAndStreaming() {
+    void currentFrameReturnsLatestFrameWhenConnectedAndStreaming() {
         FakeComunicator fake = new FakeComunicator();
         fake.connected = true;
         fake.streaming = true;
-        fake.frame = new byte[] {1, 2, 3};
-        RoverService service = new RoverService(fake, new Semaphore(1));
+        fake.frames.publish(new byte[] {1, 2, 3}, 0, 3);
+        fake.frames.publish(new byte[] {4, 5}, 0, 2);
+        RoverService service = new RoverService(fake);
 
-        byte[] frame = service.currentFrame();
-
-        assertNotNull(frame);
-        assertArrayEquals(new byte[] {1, 2, 3}, frame);
+        assertArrayEquals(new byte[] {4, 5}, service.currentFrame());
+        // Reading does not consume the frame.
+        assertArrayEquals(new byte[] {4, 5}, service.currentFrame());
     }
 
     @Test
-    void currentFrameReturnsNullForEmptyBuffer() {
+    void nextFrameReturnsNewerFrameAndTimesOutOtherwise() throws Exception {
         FakeComunicator fake = new FakeComunicator();
-        fake.connected = true;
-        fake.streaming = true;
-        fake.frame = new byte[0];
-        RoverService service = new RoverService(fake, new Semaphore(1));
+        Frame frame = fake.frames.publish(new byte[] {1}, 0, 1);
+        RoverService service = new RoverService(fake);
 
-        assertNull(service.currentFrame());
-    }
-
-    @Test
-    void currentFrameReturnsNullWhenFrameReadThrows() {
-        FakeComunicator fake = new FakeComunicator();
-        fake.connected = true;
-        fake.streaming = true;
-        fake.throwOnGetImage = true;
-        RoverService service = new RoverService(fake, new Semaphore(1));
-
-        assertNull(service.currentFrame());
-    }
-
-    @Test
-    void currentFrameReturnsNullWhenInterrupted() {
-        FakeComunicator fake = new FakeComunicator();
-        fake.connected = true;
-        fake.streaming = true;
-        fake.frame = new byte[] {1};
-        RoverService service = new RoverService(fake, new Semaphore(0));
-
-        Thread.currentThread().interrupt();
-        try {
-            assertNull(service.currentFrame());
-        } finally {
-            Thread.interrupted();
-        }
+        assertSame(frame, service.nextFrame(0, 0));
+        assertNull(service.nextFrame(frame.sequence(), 10));
     }
 
     @Test
     void shutdownClosesCommunicator() {
         FakeComunicator fake = new FakeComunicator();
-        RoverService service = new RoverService(fake, new Semaphore(0));
+        RoverService service = new RoverService(fake);
 
         service.shutdown();
 
@@ -209,7 +182,7 @@ class RoverServiceTest {
         boolean connected;
         boolean streaming;
         String infrared = "Off";
-        byte[] frame;
+        final FrameExchange frames = new FrameExchange();
 
         int connectCalls;
         int disconnectCalls;
@@ -221,7 +194,6 @@ class RoverServiceTest {
         int rightCalls;
         boolean connectResult = true;
         boolean disconnectResult = true;
-        boolean throwOnGetImage;
 
         @Override
         public synchronized boolean Connect() {
@@ -284,11 +256,13 @@ class RoverServiceTest {
         }
 
         @Override
-        public byte[] GetImageBuffer() {
-            if (throwOnGetImage) {
-                throw new RuntimeException("boom");
-            }
-            return frame;
+        public Frame latestFrame() {
+            return frames.latest();
+        }
+
+        @Override
+        public Frame awaitFrame(long afterSequence, long timeout, TimeUnit unit) throws InterruptedException {
+            return frames.awaitNewer(afterSequence, timeout, unit);
         }
 
         @Override

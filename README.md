@@ -70,11 +70,19 @@ The rover keeps moving until it gets a stop. That's why both UIs send a move com
 
 The rover sends each JPEG frame with a 36-byte header that starts with `MO_V`, often split across several TCP packets. The streaming thread reads into a buffer of about 230 KB (`imageBuffer`). When it sees the `MO_V` header of the next frame, it knows the previous frame is complete. It then:
 
-- records where that frame starts in the buffer and how long it is, skipping the 36-byte header (`GetImageStartPosition()`, `GetImageLength()`);
-- signals the optional `Semaphore` passed to the constructor, which tells the UI a new frame is ready;
+- copies that frame out of the buffer, without the 36-byte header, and publishes the copy to a `FrameExchange`;
 - moves back to the start of the buffer once it is more than half full.
 
-`GetImageBuffer()` returns a copy of the latest complete frame.
+**Sharing frames (`FrameExchange` and `Frame`)**
+
+`FrameExchange` keeps only the newest frame. Each `Frame` holds its own copy of the JPEG bytes and a sequence number that goes up by one for every new frame. Because the copy is taken as soon as the frame is complete, readers never see a frame the streaming thread is still overwriting.
+
+Reading a frame doesn't use it up, so any number of readers can share the same frames: the video stream, a desktop window, or a future image recognizer. Each reader remembers the sequence number of the last frame it handled:
+
+- `latestFrame()` returns the newest frame straight away, or `null` if there isn't one yet.
+- `awaitFrame(afterSequence, timeout, unit)` waits until a frame newer than `afterSequence` arrives, or returns `null` when the timeout runs out. Pass `0` to get the current frame immediately.
+
+A reader that falls behind simply skips to the newest frame instead of building up a backlog. Disconnecting clears the latest frame, so a stale image from the last session is never shown.
 
 **HTTP CGI calls**
 
@@ -91,7 +99,7 @@ Both run on virtual threads so they don't block the caller.
 
 [`Controller.java`](AC13%20Desktop%20Controller/src/main/java/com/rover/ac13/app/Controller.java) is a fixed-size Swing window. It has a 640×480 video panel, four arrow buttons, a CONNECT/DISCONNECT button and an "InfraRed Switch" checkbox.
 
-- When the window opens, it creates an `AC13Comunicator` with a shared `Semaphore` and starts an `image-receiver` virtual thread. That thread connects, then loops: it waits on the semaphore and shows the latest frame as an `ImageIcon`.
+- When the window opens, it creates an `AC13Comunicator` and starts an `image-receiver` virtual thread. That thread connects, then loops: it waits for each new frame with `awaitFrame(...)`, decodes it with `ImageIO`, and shows it on the Swing UI thread.
 - Pressing an arrow sends the matching move (up/down = forward/backward, left/right = rotate). Releasing it calls `stopMovement()`.
 - The controls are only enabled while connected. Closing the window disconnects from the rover.
 
@@ -108,7 +116,7 @@ A Spring Boot 4 web app (`spring-boot-starter-webmvc` and `actuator`) on port `8
 
 **Classes** (in `com.rover.ac13.web`)
 
-- **`RoverService`**: a singleton that owns one `AC13Comunicator` and one frame `Semaphore`. Its methods are `synchronized`, so requests arriving at the same time don't send commands to the rover at the same time. `currentFrame()` waits up to 300 ms for a new frame and returns `null` when the rover isn't connected or streaming. Its `@PreDestroy` hook closes the connection when the app shuts down.
+- **`RoverService`**: a singleton that owns one `AC13Comunicator`. Its command methods are `synchronized`, so requests arriving at the same time don't send commands to the rover at the same time. `currentFrame()` returns the newest frame without waiting, or `null` when the rover isn't connected or streaming. `nextFrame(afterSequence, timeout)` waits for a newer frame; each `/api/stream` client uses it independently, so every client gets every frame exactly once. Its `@PreDestroy` hook closes the connection when the app shuts down.
 - **`RoverController`**: the REST endpoints, listed below.
 - **`ApiTokenFilter`**: when an API token is configured, checks the `Authorization: Bearer <token>` header on mutating `/api/` requests (see [Authentication](#authentication)).
 - **`CorrelationIdFilter`**: runs first. It reads the `X-Correlation-Id` header, or makes a UUID if there isn't one. It stores it on the request and echoes it in the response. The Tomcat access log also prints it.

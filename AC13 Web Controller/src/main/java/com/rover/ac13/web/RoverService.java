@@ -1,30 +1,24 @@
 package com.rover.ac13.web;
 
 import com.rover.ac13.AC13Comunicator;
+import com.rover.ac13.Frame;
 import jakarta.annotation.PreDestroy;
 import org.springframework.stereotype.Service;
 
 import java.util.Map;
-import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 
 @Service
 public class RoverService {
 
-    private final Semaphore frameSemaphore;
     private final AC13Comunicator communicator;
 
     public RoverService() {
-        this(new Semaphore(0));
+        this(new AC13Comunicator());
     }
 
-    RoverService(Semaphore frameSemaphore) {
-        this(new AC13Comunicator(frameSemaphore), frameSemaphore);
-    }
-
-    RoverService(AC13Comunicator communicator, Semaphore frameSemaphore) {
+    RoverService(AC13Comunicator communicator) {
         this.communicator = communicator;
-        this.frameSemaphore = frameSemaphore;
     }
 
     public synchronized boolean connect() {
@@ -67,24 +61,27 @@ public class RoverService {
         communicator.stopMovement();
     }
 
+    /**
+     * The newest frame's JPEG bytes, or {@code null} when the rover is not connected
+     * and streaming or no frame has arrived yet. Does not wait.
+     */
     public byte[] currentFrame() {
         if (!communicator.isConnected() || !communicator.isStreaming()) {
             return null;
         }
+        Frame frame = communicator.latestFrame();
+        return frame == null ? null : frame.jpeg();
+    }
 
-        try {
-            frameSemaphore.tryAcquire(300, TimeUnit.MILLISECONDS);
-            byte[] frame = communicator.GetImageBuffer();
-            if (frame == null || frame.length == 0) {
-                return null;
-            }
-            return frame;
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return null;
-        } catch (Exception e) {
-            return null;
-        }
+    /**
+     * Waits up to {@code timeoutMillis} for a frame newer than {@code afterSequence}
+     * (pass {@code 0} for the current one). Any number of callers can do this at once
+     * without taking frames from each other.
+     *
+     * @return the newer frame, or {@code null} on timeout
+     */
+    public Frame nextFrame(long afterSequence, long timeoutMillis) throws InterruptedException {
+        return communicator.awaitFrame(afterSequence, timeoutMillis, TimeUnit.MILLISECONDS);
     }
 
     @PreDestroy

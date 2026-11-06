@@ -10,7 +10,7 @@ import java.awt.event.WindowEvent;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
-import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 
 import javax.imageio.ImageIO;
 import javax.swing.ImageIcon;
@@ -24,6 +24,7 @@ import javax.swing.border.BevelBorder;
 import javax.swing.border.EmptyBorder;
 
 import com.rover.ac13.AC13Comunicator;
+import com.rover.ac13.Frame;
 
 import java.awt.Color;
 
@@ -34,7 +35,6 @@ public class Controller extends JFrame {
 
 	private JPanel contentPane;
 	private AC13Comunicator communicator;
-	Semaphore semaphore = new Semaphore(0);
 	Thread ImageThread;
 	JPanel imagePanel;
 	JButton btnUp;
@@ -185,14 +185,19 @@ public class Controller extends JFrame {
         Connect();
 			
 		try {
-
+			long lastSequence = 0;
 			while (communicator.isStreaming()) {
-					
-				//Waiting for image
-				semaphore.acquire();	
-				DisplayImage();	
-				
+				// Wait for a frame newer than the last one shown; time out periodically
+				// so the loop notices when streaming stops.
+				Frame frame = communicator.awaitFrame(lastSequence, 500, TimeUnit.MILLISECONDS);
+				if (frame == null) {
+					continue;
+				}
+				lastSequence = frame.sequence();
+				DisplayImage(frame.jpeg());
 			}
+		} catch (InterruptedException e) {
+			Thread.currentThread().interrupt();
 		} catch (Exception e) {
 			JOptionPane.showMessageDialog(Controller.this, e.toString());
 
@@ -200,7 +205,7 @@ public class Controller extends JFrame {
     	
     }
     
-    private void DisplayImage()
+    private void DisplayImage(byte[] jpeg)
     {
     	
     	// Decode with ImageIO rather than new ImageIcon(byte[]): the rover pads its JPEG
@@ -209,7 +214,7 @@ public class Controller extends JFrame {
     	// frame. ImageIO decodes the same frames without writing anything to the console.
     	BufferedImage frame;
     	try {
-    		frame = ImageIO.read(new ByteArrayInputStream(communicator.GetImageBuffer()));
+    		frame = ImageIO.read(new ByteArrayInputStream(jpeg));
     	} catch (IOException e) {
     		return; // undecodable frame: keep showing the previous one
     	}
@@ -267,7 +272,7 @@ public class Controller extends JFrame {
 	}
 	/////////////////////////////////////////////////// EVENT HANDLERS /////////////////////////////////////////////////
 	private void OnWindowLoad(WindowEvent e) {
-		communicator = new AC13Comunicator(semaphore);
+		communicator = new AC13Comunicator();
 		ImageThread = Thread.ofVirtual().name("image-receiver").start(() -> {
 			try {
 				receiveImage();
@@ -310,7 +315,7 @@ public class Controller extends JFrame {
 		if(communicator.isConnected())
 		{
 			Disconnect();
-			communicator = new AC13Comunicator(semaphore);
+			communicator = new AC13Comunicator();
 			lblImage.setIcon(null);//Remove image
 		}
 		else {

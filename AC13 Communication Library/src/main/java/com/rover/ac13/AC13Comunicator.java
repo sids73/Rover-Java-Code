@@ -16,10 +16,9 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Base64;
 import java.util.List;
-import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 
 public class AC13Comunicator implements AutoCloseable {
 	private static final String ROVER_HOST = "192.168.1.100";
@@ -86,7 +85,9 @@ public class AC13Comunicator implements AutoCloseable {
 	
 	//Thread Handling objects
 	private Thread T;
-	private Semaphore semaphore;
+
+	// Completed frames are published here for any number of readers.
+	private final FrameExchange frames = new FrameExchange();
 	
 	// TCP/IP sockets
 	private Socket cSock;
@@ -112,8 +113,6 @@ public class AC13Comunicator implements AutoCloseable {
 	byte[] imageBuffer = new byte[maxImageBuffer];
 	int imagePtr = 0;
 	int tcpPtr = 0;
-	private int imageStartPosition;
-	private int imageLength;
 
 
 	// Debugging variables
@@ -126,12 +125,6 @@ public class AC13Comunicator implements AutoCloseable {
 	public AC13Comunicator() {
 		
 		PARAMETERS = new Parameters();
-	}
-	
-	public AC13Comunicator(Semaphore semaphore ){
-		
-		this();
-		this.semaphore = semaphore;
 	}
 	
 	public boolean isConnected(){
@@ -211,6 +204,7 @@ public class AC13Comunicator implements AutoCloseable {
 			closeQuietly(vSock);
 			cSock = null;
 			vSock = null;
+			frames.clear();
 			
 			isConnected = false;
 			
@@ -281,14 +275,8 @@ public class AC13Comunicator implements AutoCloseable {
 	private boolean startStreaming() {
 		streaming = true;
 		T = Thread.ofVirtual().name("rover-video-stream").start(() -> {
-			if (semaphore == null) {
-				while (streaming) {
-					ReceiveImage();
-				}
-			} else {
-				while (streaming) {
-					ReceiveImageUsingSemaphore();
-				}
+			while (streaming) {
+				ReceiveImage();
 			}
 		});
 		return true;
@@ -345,32 +333,20 @@ public class AC13Comunicator implements AutoCloseable {
 		return streaming;	
 	}
 	
-	public byte[] GetImageBuffer(){
+	/** The newest complete frame, or {@code null} if none has arrived since connecting. */
+	public Frame latestFrame() {
+		return frames.latest();
+	}
 
-		return 	Arrays.copyOfRange(imageBuffer, GetImageStartPosition(), GetImageStartPosition() + GetImageLength());
-	}
-	
-	public byte[] GetRawImageBuffer(){	
-		
-		return imageBuffer;	
-	}
-	
-	public int  GetImageLength(){	
-		
-		return this.imageLength;
-	}
-	
-	public int GetImageStartPosition(){
-		
-		return this.imageStartPosition;
-	}
-	
-	private void SetImageStartPosition(int start){	
-		this.imageStartPosition = start;	
-	}
-	
-	private void SetImageLength(int len){	
-		this.imageLength = len;	
+	/**
+	 * Waits up to {@code timeout} for a frame newer than {@code afterSequence}.
+	 * Pass {@code 0} to get the current frame straight away if there is one.
+	 *
+	 * @return the newer frame, or {@code null} on timeout
+	 * @see FrameExchange#awaitNewer(long, long, TimeUnit)
+	 */
+	public Frame awaitFrame(long afterSequence, long timeout, TimeUnit unit) throws InterruptedException {
+		return frames.awaitNewer(afterSequence, timeout, unit);
 	}
 		
 	private boolean ImgStart(byte[] start) {
@@ -403,61 +379,12 @@ public class AC13Comunicator implements AutoCloseable {
 					newPtr += len;
 					imageLength = newPtr - imagePtr;
 				} else {
-					// strip 36-byte packet header
-					SetImageStartPosition(imagePtr + 36);
-					SetImageLength(imageLength - 36);
-
-					if (newPtr > maxImageBuffer / 2) {
-						// wrap: copy leading bytes of new image to start of buffer
-						System.arraycopy(imageBuffer, newPtr, imageBuffer, 0, len);
-						imagePtr = 0;
-						tcpPtr = len;
-					} else {
-						imagePtr = newPtr;
-						tcpPtr = newPtr + len;
+					// The previous frame is complete. Strip its 36-byte packet header and
+					// publish a copy now, before the buffer below is reused for the next one.
+					int jpegLength = imageLength - 36;
+					if (jpegLength > 0) {
+						frames.publish(imageBuffer, imagePtr + 36, jpegLength);
 					}
-				}
-			}
-
-			// reset if buffer boundary exceeded
-			if (newPtr >= maxImageBuffer - maxTCPBuffer) {
-				imagePtr = 0;
-				tcpPtr = 0;
-			}
-		} catch (Exception _) {
-			// socket read error during streaming – silently continue
-		}
-	}
-	
-	private void ReceiveImageUsingSemaphore() {
-		try {
-			int len;
-			int newPtr = tcpPtr;
-			int imageLength = 0;
-			boolean fnew = false;
-
-			while (!fnew && newPtr < maxImageBuffer - maxTCPBuffer) {
-				len = vSock.getInputStream().read(imageBuffer, newPtr, maxTCPBuffer);
-				if (len <= 0) {
-					continue;
-				}
-
-				byte[] f4 = new byte[4];
-				for (int i = 0; i < 4; i++) {
-					f4[i] = imageBuffer[newPtr + i];
-				}
-
-				if (ImgStart(f4) && imageLength > 0) {
-					fnew = true;
-				}
-
-				if (!fnew) {
-					newPtr += len;
-					imageLength = newPtr - imagePtr;
-				} else {
-					SetImageStartPosition(imagePtr + 36);
-					SetImageLength(imageLength - 36);
-					semaphore.release();
 
 					if (newPtr > maxImageBuffer / 2) {
 						// wrap: copy leading bytes of new image to start of buffer

@@ -8,6 +8,8 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import com.rover.ac13.Frame;
+
 import java.io.IOException;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
@@ -86,24 +88,28 @@ public class RoverController {
 
         ServletOutputStream out = response.getOutputStream();
         long idleSince = System.nanoTime();
+        long lastSequence = 0;
 
         while (!Thread.currentThread().isInterrupted()) {
-            byte[] frame = roverService.currentFrame();
-            if (frame == null) {
-                // No frame (e.g. rover disconnected). Back off instead of spinning, and end the
-                // response after a while so the request thread is released; the UI reconnects.
+            Frame next;
+            try {
+                // Blocks until a new frame is published, so each frame is sent once and
+                // an idle stream (e.g. rover disconnected) waits instead of spinning.
+                next = roverService.nextFrame(lastSequence, pollIntervalMillis);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+            if (next == null) {
+                // End the response after a while so the request thread is released; the UI reconnects.
                 if (System.nanoTime() - idleSince >= idleTimeoutNanos) {
-                    return;
-                }
-                try {
-                    Thread.sleep(pollIntervalMillis);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
                     return;
                 }
                 continue;
             }
             idleSince = System.nanoTime();
+            lastSequence = next.sequence();
+            byte[] frame = next.jpeg();
 
             out.write(("--" + BOUNDARY + "\r\n").getBytes());
             out.write("Content-Type: image/jpeg\r\n".getBytes());

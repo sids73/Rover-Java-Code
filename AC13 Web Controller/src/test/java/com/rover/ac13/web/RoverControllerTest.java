@@ -3,7 +3,10 @@ package com.rover.ac13.web;
 import jakarta.servlet.ServletOutputStream;
 import jakarta.servlet.WriteListener;
 import jakarta.servlet.http.HttpServletResponse;
+import com.rover.ac13.Frame;
+import com.rover.ac13.FrameExchange;
 import org.junit.jupiter.api.Test;
+import org.mockito.InOrder;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
 import org.springframework.http.MediaType;
@@ -16,6 +19,7 @@ import java.util.Map;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
@@ -154,10 +158,15 @@ class RoverControllerTest {
                 .andExpect(content().bytes(new byte[] {1, 2, 3}));
     }
 
+    private static Frame frame(FrameExchange exchange, byte... jpeg) {
+        return exchange.publish(jpeg, 0, jpeg.length);
+    }
+
     @Test
-    void streamLoopsThroughNullFrameThenWritesFrame() throws Exception {
+    void streamLoopsThroughEmptyWaitThenWritesFrame() throws Exception {
         RoverService service = mock(RoverService.class);
-        when(service.currentFrame()).thenReturn(null, new byte[] {1, 2, 3});
+        Frame frame = frame(new FrameExchange(), (byte) 1, (byte) 2, (byte) 3);
+        when(service.nextFrame(anyLong(), anyLong())).thenReturn(null, frame);
 
         MockHttpServletResponse response = new MockHttpServletResponse() {
             @Override
@@ -169,11 +178,38 @@ class RoverControllerTest {
         RoverController controller = new RoverController(service, 5000, 1);
 
         assertThrows(IOException.class, () -> controller.stream(response));
-        verify(service, atLeast(2)).currentFrame();
+        verify(service, times(2)).nextFrame(0, 1);
         org.junit.jupiter.api.Assertions.assertEquals(
             "multipart/x-mixed-replace; boundary=frame",
             response.getContentType()
         );
+    }
+
+    @Test
+    void streamSendsEachFrameOnceAndAsksForNewerOnes() throws Exception {
+        RoverService service = mock(RoverService.class);
+        FrameExchange exchange = new FrameExchange();
+        Frame first = frame(exchange, (byte) 1);
+        Frame second = frame(exchange, (byte) 2, (byte) 2);
+        when(service.nextFrame(anyLong(), anyLong()))
+                .thenReturn(first, second)
+                .thenThrow(new InterruptedException("stop"));
+        MockHttpServletResponse response = new MockHttpServletResponse();
+
+        try {
+            new RoverController(service, 5000, 7).stream(response);
+        } finally {
+            Thread.interrupted();
+        }
+
+        InOrder order = inOrder(service);
+        order.verify(service).nextFrame(0, 7);
+        order.verify(service).nextFrame(first.sequence(), 7);
+        order.verify(service).nextFrame(second.sequence(), 7);
+        String body = response.getContentAsString();
+        org.junit.jupiter.api.Assertions.assertEquals(2, body.split("--frame", -1).length - 1);
+        org.junit.jupiter.api.Assertions.assertTrue(body.contains("Content-Length: 1\r\n"));
+        org.junit.jupiter.api.Assertions.assertTrue(body.contains("Content-Length: 2\r\n"));
     }
 
     @Test
@@ -189,13 +225,13 @@ class RoverControllerTest {
             Thread.interrupted();
         }
 
-        verify(service, never()).currentFrame();
+        verify(service, never()).nextFrame(anyLong(), anyLong());
     }
 
     @Test
     void streamWritesFrameAndStopsAfterFlushInterrupt() throws Exception {
         RoverService service = mock(RoverService.class);
-        when(service.currentFrame()).thenReturn(new byte[] {1, 2, 3});
+        when(service.nextFrame(anyLong(), anyLong())).thenReturn(frame(new FrameExchange(), (byte) 1, (byte) 2));
 
         MockHttpServletResponse response = new MockHttpServletResponse() {
             @Override
@@ -207,29 +243,27 @@ class RoverControllerTest {
         RoverController controller = new RoverController(service, 5000, 1);
 
         controller.stream(response);
+        Thread.interrupted();
 
-        verify(service, atLeastOnce()).currentFrame();
+        verify(service, times(1)).nextFrame(anyLong(), anyLong());
     }
 
     @Test
     void streamEndsWhenNoFrameArrivesBeforeIdleTimeout() throws Exception {
         RoverService service = mock(RoverService.class);
-        when(service.currentFrame()).thenReturn(null);
+        when(service.nextFrame(anyLong(), anyLong())).thenReturn(null);
         MockHttpServletResponse response = new MockHttpServletResponse();
 
         new RoverController(service, 20, 1).stream(response);
 
-        verify(service, atLeast(2)).currentFrame();
+        verify(service, atLeast(1)).nextFrame(anyLong(), anyLong());
         org.junit.jupiter.api.Assertions.assertEquals(0, response.getContentAsByteArray().length);
     }
 
     @Test
     void streamStopsWhenInterruptedWhileWaitingForFrame() throws Exception {
         RoverService service = mock(RoverService.class);
-        when(service.currentFrame()).thenAnswer(invocation -> {
-            Thread.currentThread().interrupt();
-            return null;
-        });
+        when(service.nextFrame(anyLong(), anyLong())).thenThrow(new InterruptedException("stop"));
         RoverController controller = new RoverController(service, 5000, 1000);
 
         try {
@@ -239,7 +273,7 @@ class RoverControllerTest {
             Thread.interrupted();
         }
 
-        verify(service, times(1)).currentFrame();
+        verify(service, times(1)).nextFrame(anyLong(), anyLong());
     }
 
     static class ExplodingServletOutputStream extends ServletOutputStream {
