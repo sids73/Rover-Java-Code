@@ -187,6 +187,27 @@ class Detector:
         return results
 
 
+def decode_jpeg(jpeg: bytes):
+    """Decode a JPEG to an RGB ``numpy`` array, or return ``None`` if it can't be decoded.
+
+    Uses Pillow rather than ``cv2.imdecode``: the rover pads its frames with a few
+    bytes before the end-of-image marker, and the libjpeg inside OpenCV (and
+    torchvision) prints "Corrupt JPEG data: N extraneous bytes before marker 0xd9"
+    to stderr for every such frame. Pillow decodes them the same way, silently.
+    """
+    import io
+
+    import numpy as np
+    from PIL import Image
+
+    try:
+        with Image.open(io.BytesIO(jpeg)) as image:
+            # np.array (not asarray) gives a writable copy; torch warns about read-only arrays.
+            return np.array(image.convert("RGB"))
+    except OSError:  # includes UnidentifiedImageError and truncated data
+        return None
+
+
 def pick_device(requested: str) -> str:
     if requested != "auto":
         return requested
@@ -274,12 +295,13 @@ def main(argv: list[str] | None = None) -> int:
                 continue
 
             last_seq, jpeg = got
-            bgr = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
-            if bgr is None:
+            rgb = decode_jpeg(jpeg)
+            if rgb is None:
                 continue  # undecodable frame; wait for the next one
+            bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)  # OpenCV draws and displays in BGR
 
             started = time.perf_counter()
-            detections = detector.detect(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+            detections = detector.detect(rgb)
             elapsed = time.perf_counter() - started
             fps = 1 / elapsed if fps == 0 else 0.9 * fps + 0.1 / elapsed
 
