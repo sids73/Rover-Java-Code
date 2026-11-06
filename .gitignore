@@ -15,3 +15,7 @@ target/
 
 # macOS
 .DS_Store
+
+# Python (recognition/)
+.venv/
+__pycache__/

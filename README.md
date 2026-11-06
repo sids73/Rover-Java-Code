@@ -30,6 +30,7 @@ The project drives an AC13 Wi-Fi rover: a small tracked robot with a camera and 
 | `AC13 Communication Library` | `ac13-communicator-library` | Plain Java library that speaks the rover's protocol. It has no dependencies. |
 | `AC13 Desktop Controller` | `ac13-desktop-controller` | Swing desktop app. Shows the video feed and has arrow buttons and an infrared switch. |
 | `AC13 Web Controller` | `ac13-web-controller` | Spring Boot app. Offers the same controls as a REST API and a browser page. |
+| `recognition/` | (Python, not Maven) | Object detection on the camera stream. See [Image Recognition](#image-recognition). |
 
 The root `pom.xml` is the parent of all three modules. It sets Java 25, the Surefire setup, and the `quality` and `coverage` profiles.
 
@@ -165,6 +166,54 @@ When no token is set, the check is off and the app logs a warning at startup. Do
 **Build metadata**
 
 The `spring-boot-maven-plugin` `build-info` goal adds a `commit.hash` property to the build info. You can see it at `/actuator/info`. CI passes `-Dcommit.hash=${{ github.sha }}`. Local builds use `local` by default.
+
+## Image Recognition
+
+[`recognition/rover_detect.py`](recognition/rover_detect.py) is a Python script that detects objects in the rover's camera feed. It recognizes the 80 everyday object types of the COCO dataset: people, cups, chairs, bottles, cats, dogs and so on.
+
+It reads the web controller's `/api/stream`, runs a pre-trained torchvision detector on each frame, and shows the video with labelled boxes. It needs no changes to the Java code. It only uses `GET` endpoints, so it doesn't need the API token.
+
+**How it works**
+
+- A background thread reads the MJPEG stream and keeps only the newest frame. If detection is slower than the camera, frames are skipped instead of queuing up, so the boxes always match what the rover sees now. When the server closes the stream (for example, because the rover isn't connected), the thread reconnects every second.
+- The default model is SSDLite with MobileNetV3, which takes about 110 ms per 640×480 frame on an Apple Silicon CPU. `--model fasterrcnn` is more accurate but noticeably slower. Both are BSD-licensed torchvision models trained on COCO.
+
+**Setup** (Python 3.15 works; run from the repository root):
+
+```bash
+python3 -m venv recognition/.venv
+recognition/.venv/bin/pip install -r recognition/requirements.txt
+```
+
+Your computer has to join the rover's Wi-Fi to drive it, and that usually means no internet. So download the model weights once beforehand, while you're online. They're cached in `~/.cache/torch`:
+
+```bash
+recognition/.venv/bin/python recognition/rover_detect.py --prepare
+```
+
+**Run** while the web controller is running and connected to the rover:
+
+```bash
+recognition/.venv/bin/python recognition/rover_detect.py
+```
+
+Press `q` or `Esc` in the window to quit. Useful options:
+
+| Option | Effect |
+|---|---|
+| `--url http://host:8080` | Web controller address (default `http://localhost:8080`). |
+| `--classes person,cup` | Only show these object types. `--list-classes` prints all names. |
+| `--threshold 0.6` | Minimum confidence, 0–1 (default 0.5). |
+| `--model fasterrcnn` | Use the slower, more accurate model. Run `--prepare` with it first. |
+| `--json` | Print one JSON line per frame: `{"time", "frame", "width", "height", "detections": [{"label", "score", "box": [x1, y1, x2, y2]}]}`. |
+| `--no-window` | Don't open a window (use with `--json`, e.g. to feed another program). |
+| `--device mps` | Run on another torch device. The default is `cpu` (or `cuda` if available). The Apple Silicon GPU (`mps`) works, but it isn't faster for the default model. It may help with `fasterrcnn`. |
+
+**Tests** (stream parsing and frame handoff; no PyTorch needed):
+
+```bash
+cd recognition && python3 -m unittest -v test_rover_detect
+```
 
 ## Requirements
 
