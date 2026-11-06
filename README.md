@@ -121,7 +121,7 @@ A Spring Boot 4 web app (`spring-boot-starter-webmvc` and `actuator`) on port `8
 - **`RoverController`**: the REST endpoints, listed below.
 - **`DetectionController`** and **`DetectionService`**: receive object detections from an external recognizer and serve the latest report to the page (see [Image Recognition](#image-recognition)). Reports are checked before they're stored: size, labels, scores from 0 to 1, four-number boxes, and at most 100 detections.
 - **`ApiTokenFilter`**: when an API token is configured, checks the `Authorization: Bearer <token>` header on mutating `/api/` requests (see [Authentication](#authentication)).
-- **`CorrelationIdFilter`**: runs first. It reads the `X-Correlation-Id` header, or makes a UUID if there isn't one. It stores it on the request and echoes it in the response. The Tomcat access log also prints it.
+- **`CorrelationIdFilter`**: runs first. It reads the `X-Correlation-Id` header and reuses it only if it's 1–64 letters, digits, `.`, `_`, `:` or `-`. Otherwise, including when it's missing or contains line breaks, it makes a new UUID. That stops client input from splitting the response headers or adding fake lines to the logs. It stores the ID on the request and echoes it in the response. The Tomcat access log also prints it.
 - **`ApiExceptionHandler`** and **`ApiError`**: for `RoverController` and `DetectionController` routes, turn exceptions into JSON. Bad input, such as an unknown move direction or a malformed request body, returns `400`. Anything else returns `500`. The JSON looks like `{timestamp, status, error, message, path, correlationId}`.
 
 **REST API**
