@@ -199,8 +199,7 @@ public class Controller extends JFrame {
 		} catch (InterruptedException e) {
 			Thread.currentThread().interrupt();
 		} catch (Exception e) {
-			JOptionPane.showMessageDialog(Controller.this, e.toString());
-
+			showError(e);
 		}
     	
     }
@@ -222,26 +221,30 @@ public class Controller extends JFrame {
     		return;
     	}
 
-    	// Swing components must only be touched on the event dispatch thread.
+    	// Swing components must only be touched on the event dispatch thread. By the time
+    	// this runs the user may have disconnected (which clears the image), so check again.
     	ImageIcon image = new ImageIcon(frame);
-    	EventQueue.invokeLater(() -> lblImage.setIcon(image));
+    	onUiThread(() -> {
+    		if (communicator.isStreaming()) {
+    			lblImage.setIcon(image);
+    		}
+    	});
 
     }
     
     
     
     private void Connect(){	
-		communicator.Connect();
-		
-		if(communicator.isConnected())
-		{
-			btnConnect.setText("DISCONNECT");
-			SwitchControlsState(true);
-		}
-		else {
-			SwitchControlsState(false);//Disabling controls buttons
-		}
-		 
+		// Runs on the image-receiver virtual thread: the blocking connect happens here,
+		// and only the resulting UI changes are handed to the event dispatch thread.
+		boolean connected = communicator.Connect();
+
+		onUiThread(() -> {
+			if (connected) {
+				btnConnect.setText("DISCONNECT");
+			}
+			SwitchControlsState(connected);
+		});
 	}
 	
 	private void Disconnect() {
@@ -249,10 +252,28 @@ public class Controller extends JFrame {
 		
 		if(!communicator.isConnected())
 		{
-			btnConnect.setText("CONNECT");
-			SwitchControlsState(false);
+			onUiThread(() -> {
+				btnConnect.setText("CONNECT");
+				SwitchControlsState(false);
+			});
 		}
-		
+
+	}
+
+	/**
+	 * Runs {@code task} on the Swing event dispatch thread: immediately if already
+	 * there (e.g. from a button handler), otherwise queued with invokeLater.
+	 */
+	private static void onUiThread(Runnable task) {
+		if (EventQueue.isDispatchThread()) {
+			task.run();
+		} else {
+			EventQueue.invokeLater(task);
+		}
+	}
+
+	private void showError(Exception e) {
+		onUiThread(() -> JOptionPane.showMessageDialog(Controller.this, e.toString()));
 	}
 	
 	private void StopWheels()
@@ -277,7 +298,7 @@ public class Controller extends JFrame {
 			try {
 				receiveImage();
 			} catch (Exception ex) {
-				JOptionPane.showMessageDialog(Controller.this, ex.toString());
+				showError(ex);
 			}
 		});
 	}
@@ -323,7 +344,7 @@ public class Controller extends JFrame {
 				try {
 					receiveImage();
 				} catch (Exception ex) {
-					JOptionPane.showMessageDialog(Controller.this, ex.toString());
+					showError(ex);
 				}
 			});
 		}
